@@ -18,6 +18,9 @@ dependencies = [
     "pillow-heif>=1.0",
     "pypdf>=4.0",
     "streamlit>=1.40.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "python-multipart>=0.0.9",
     "python-dotenv>=1.0",
     "watchdog>=4.0",
 ]
@@ -36,7 +39,7 @@ requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["shared*", "agents*", "orchestrator*", "ui*"]
+include = ["shared*", "agents*", "orchestrator*", "ui*", "api*"]
 
 [tool.ruff]
 line-length = 100
