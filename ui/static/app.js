@@ -706,6 +706,12 @@ function closeModal() {
     document.getElementById('modal-content').innerHTML = '';
 }
 
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !document.getElementById('modal-overlay').classList.contains('hidden')) {
+        closeModal();
+    }
+});
+
 function showConfirmModal(message, onConfirm) {
     const html = `
         <div style="text-align:center;padding:1rem;">
