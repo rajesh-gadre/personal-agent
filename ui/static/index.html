@@ -331,11 +331,10 @@
         <!-- Tab 1: Upload -->
         <section id="tab-upload" class="tab-content active">
             <div class="upload-area">
-                <input type="file" id="file-input" accept=".png,.jpg,.jpeg,.heic,.heif,.pdf">
-                <button class="btn btn-primary" id="analyze-btn" disabled>Analyze Receipt</button>
+                <input type="file" id="file-input" accept=".png,.jpg,.jpeg,.heic,.heif,.pdf" multiple>
+                <button class="btn btn-primary" id="analyze-btn" disabled>Upload Receipt(s)</button>
             </div>
-            <div id="upload-size-info" class="text-muted hidden"></div>
-            <div id="upload-review"></div>
+            <div id="upload-status"></div>
         </section>
 
         <!-- Tab 2: Pending Review -->
@@ -404,6 +403,6 @@
         <div class="spinner"></div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=2"></script>
 </body>
 </html>

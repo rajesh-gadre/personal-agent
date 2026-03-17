@@ -24,6 +24,12 @@ class AnalyzeResponse(BaseModel):
     sent_size_bytes: int = 0
 
 
+class QueueResponse(BaseModel):
+    queued: int  # Number of files successfully queued
+    filenames: list[str]
+    errors: list[str] = []
+
+
 class StagedReceiptResponse(BaseModel):
     staging_id: str
     image_url: str

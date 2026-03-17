@@ -84,22 +84,18 @@ def _create_event_observer(watch_dir: Path):
     return observer
 
 
-# ── Polling-based watcher (legacy fallback) ──
-
-
-def _poll_loop(watch_dir: Path) -> None:
-    """Polling loop that scans the watch folder periodically."""
-    interval = settings.receipt_watch_interval_seconds
-    logger.info(f"Watcher: polling {watch_dir} every {interval}s")
-    while True:
-        try:
-            _scan_existing(watch_dir)
-        except Exception as e:
-            logger.error(f"Watcher: error in poll loop: {e}")
-        time.sleep(interval)
-
-
 # ── Entry points ──
+
+
+def _watch_dirs() -> list[Path]:
+    """Return all directories to watch: ~/Receipts + data/incoming."""
+    dirs = [Path(settings.receipt_watch_folder).expanduser()]
+    incoming = Path(settings.receipt_incoming_folder)
+    if incoming not in dirs:
+        dirs.append(incoming)
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+    return dirs
 
 
 def run_watcher() -> None:
@@ -113,36 +109,50 @@ def run_watcher() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    watch_dir = Path(settings.receipt_watch_folder).expanduser()
-    watch_dir.mkdir(parents=True, exist_ok=True)
+    watch_dirs = _watch_dirs()
     mode = getattr(settings, "receipt_watcher_mode", "event")
 
-    # Process files already in folder
-    logger.info(f"Watcher: scanning existing files in {watch_dir}")
-    _scan_existing(watch_dir)
+    # Process files already in folders
+    for d in watch_dirs:
+        logger.info(f"Watcher: scanning existing files in {d}")
+        _scan_existing(d)
 
     if mode == "event":
-        logger.info(f"Watcher: monitoring {watch_dir} (event mode)")
-        observer = _create_event_observer(watch_dir)
-        observer.start()
+        observers = []
+        for d in watch_dirs:
+            logger.info(f"Watcher: monitoring {d} (event mode)")
+            obs = _create_event_observer(d)
+            obs.start()
+            observers.append(obs)
 
         def _shutdown(signum, frame):
             logger.info("Watcher: shutting down...")
-            observer.stop()
-            observer.join()
+            for obs in observers:
+                obs.stop()
+                obs.join()
             sys.exit(0)
 
         signal.signal(signal.SIGTERM, _shutdown)
         signal.signal(signal.SIGINT, _shutdown)
 
         try:
-            observer.join()
+            for obs in observers:
+                obs.join()
         except KeyboardInterrupt:
-            observer.stop()
-            observer.join()
+            for obs in observers:
+                obs.stop()
+                obs.join()
     else:
-        logger.info(f"Watcher: monitoring {watch_dir} (poll mode)")
-        _poll_loop(watch_dir)
+        # Poll mode: scan all folders in one loop
+        interval = settings.receipt_watch_interval_seconds
+        logger.info(f"Watcher: polling {[str(d) for d in watch_dirs]} every {interval}s")
+        while True:
+            for d in watch_dirs:
+                try:
+                    _scan_existing(d)
+                except Exception as e:
+                    logger.error(f"Watcher: error polling {d}: {e}")
+            time.sleep(interval)
 
 
 _watcher_thread: threading.Thread | None = None
@@ -154,25 +164,36 @@ def start_watcher() -> None:
     if _watcher_thread is not None and _watcher_thread.is_alive():
         return
 
-    watch_dir = Path(settings.receipt_watch_folder).expanduser()
-    watch_dir.mkdir(parents=True, exist_ok=True)
+    watch_dirs = _watch_dirs()
     mode = getattr(settings, "receipt_watcher_mode", "event")
 
-    # Scan existing files first
-    _scan_existing(watch_dir)
+    for d in watch_dirs:
+        _scan_existing(d)
 
     if mode == "event":
-        observer = _create_event_observer(watch_dir)
-        observer.daemon = True
-        observer.start()
-        _watcher_thread = observer  # Observer is a Thread subclass
-        logger.info(f"Watcher: background event watcher started on {watch_dir}")
+        # Start one observer per folder; keep reference to first as _watcher_thread
+        observers = []
+        for d in watch_dirs:
+            obs = _create_event_observer(d)
+            obs.daemon = True
+            obs.start()
+            observers.append(obs)
+            logger.info(f"Watcher: background event watcher started on {d}")
+        _watcher_thread = observers[0]
     else:
-        _watcher_thread = threading.Thread(
-            target=_poll_loop, args=(watch_dir,), daemon=True, name="receipt-watcher"
-        )
+        def _poll_all():
+            interval = settings.receipt_watch_interval_seconds
+            while True:
+                for d in watch_dirs:
+                    try:
+                        _scan_existing(d)
+                    except Exception as e:
+                        logger.error(f"Watcher: error polling {d}: {e}")
+                time.sleep(interval)
+
+        _watcher_thread = threading.Thread(target=_poll_all, daemon=True, name="receipt-watcher")
         _watcher_thread.start()
-        logger.info(f"Watcher: background poll watcher started on {watch_dir}")
+        logger.info(f"Watcher: background poll watcher started on {[str(d) for d in watch_dirs]}")
 
 
 if __name__ == "__main__":
