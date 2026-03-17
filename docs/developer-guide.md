@@ -2,7 +2,7 @@
 
 ## Overview
 
-A multi-agent personal assistant built with LangGraph, starting with a **Receipt Analyzer** agent. The system uses a monorepo structure with shared infrastructure (`shared/`) and individual agents (`agents/`), orchestrated through a Streamlit web UI.
+A multi-agent personal assistant built with LangGraph, starting with a **Receipt Analyzer** agent. The system uses a monorepo structure with shared infrastructure (`shared/`) and individual agents (`agents/`), with a FastAPI backend serving a vanilla HTML/JS frontend.
 
 ---
 
@@ -23,12 +23,21 @@ personal-agent/
 │       ├── schemas.py          # Pydantic data models
 │       ├── staging.py          # Staging workflow + dedup
 │       ├── storage.py          # SQLite CRUD
-│       └── watcher.py          # Background folder watcher
+│       └── watcher.py          # Background folder watcher (dual folder)
+├── api/                        # FastAPI backend
+│   ├── main.py                 # App factory, middleware, error handlers
+│   ├── models.py               # Pydantic request/response models
+│   ├── image.py                # Image URL helper
+│   └── routers/
+│       ├── receipts.py         # Upload, staging, image serving endpoints
+│       └── expenses.py         # Query, summary, delete endpoints
 ├── ui/
-│   └── app.py                  # Streamlit web UI
+│   └── static/
+│       ├── index.html          # Single-page app shell + CSS
+│       └── app.js              # Vanilla JS (no framework, no build step)
 ├── data/                       # Runtime data (not in git)
 │   ├── personal_agent.db       # SQLite database
-│   ├── uploads/                # Direct UI uploads
+│   ├── incoming/               # Landing area for UI uploads (watcher picks up)
 │   ├── staging/                # Pending review (image + JSON sidecar)
 │   ├── archive/                # Approved receipt images
 │   └── rejected/               # Rejected receipt images
@@ -42,20 +51,21 @@ personal-agent/
 ### High-Level Flow
 
 ```
-  ~/Receipts/              data/uploads/
-  (watch folder)           (UI uploads)
+  ~/Receipts/              data/incoming/
+  (drop folder)            (UI uploads land here)
        │                        │
-       │ watcher detects        │ user clicks "Analyze"
-       │ (event-based)          │ (file stays in uploads/)
-       ▼                        ▼
+       │ watcher detects        │ watcher detects
+       │ (event-based)          │ (event-based)
+       └──────────┬─────────────┘
+                  ▼
   ┌─────────────────────────────────────┐
   │  LangGraph Pipeline (4 nodes)       │
   │  detect → extract → validate →      │──► data/staging/
   │                            stage    │    (image COPY + JSON sidecar)
-  └─────────────────────────────────────┘        |
+  └─────────────────────────────────────┘        │
        │                                         │
        │ watcher DELETES                         │
-       │ ~/Receipts original              UI: Review & Edit
+       │ original file                    UI: Review & Edit
        │                                  (editable fields)
        ▼                                         │
   original gone,                       ┌─────────┴─────────┐
@@ -72,17 +82,17 @@ personal-agent/
 
 | Step | Action | File location |
 |------|--------|---------------|
-| 0 | User drops file | `~/Receipts/receipt.HEIC` |
-| 1 | Watcher detects file (watchdog event), waits 2s | `~/Receipts/receipt.HEIC` |
-| 2 | `detect_file_type` — checks extension | `~/Receipts/receipt.HEIC` |
-| 3 | `extract_receipt` — reads file, base64, LLM call #1 | `~/Receipts/receipt.HEIC` |
-| 4 | `validate_receipt` — LLM call #2 (JSON only, no image) | `~/Receipts/receipt.HEIC` |
-| 5 | `stage_receipt` — **copies** image + writes JSON sidecar | `~/Receipts/receipt.HEIC` + `data/staging/{id}.HEIC` + `data/staging/{id}.json` |
+| 0 | User drops file or UI uploads | `~/Receipts/receipt.HEIC` or `data/incoming/receipt.HEIC` |
+| 1 | Watcher detects file (watchdog event), waits 2s | same |
+| 2 | `detect_file_type` — checks extension | same |
+| 3 | `extract_receipt` — reads file, base64, LLM call #1 | same |
+| 4 | `validate_receipt` — LLM call #2 (JSON only, no image) | same |
+| 5 | `stage_receipt` — **copies** image + writes JSON sidecar | original + `data/staging/{id}.HEIC` + `data/staging/{id}.json` |
 | 6 | Watcher **deletes** original (pipeline succeeded) | `data/staging/{id}.HEIC` + `.json` only |
 | 7a | **Approve**: validate → DB save → move image → delete JSON | `data/archive/{id}.HEIC` (DB points here) |
 | 7b | **Reject**: move image + JSON to rejected/ | `data/rejected/{id}.HEIC` + `.json` |
 
-**Key point:** The original is never lost — it's copied to staging at step 5, then moved to `archive/` or `rejected/` at step 7. To reprocess, copy from any of those locations back to `~/Receipts`.
+**Key point:** The original is never lost — it's copied to staging at step 5, then moved to `archive/` or `rejected/` at step 7.
 
 ---
 
@@ -146,6 +156,13 @@ When an image exceeds `MAX_IMAGE_BYTES` (3.75MB) or is HEIC/HEIF format:
 2. Progressively try smaller dimensions: `[original, 2048, 1600, 1200]`
 3. At each dimension, save as JPEG with quality=90
 4. Stop when under the size limit
+
+### Web Image Serving
+
+Images are served via `/api/receipts/image/{source}/{filename}`. The server:
+- Converts HEIC/HEIF → JPEG on first request, caches as `.web.jpg`
+- Resizes images >500KB to max 1200px, caches as `.web.jpg`
+- Sets `Cache-Control: public, max-age=86400` (1-day browser cache)
 
 ### Supported Formats
 
@@ -217,12 +234,12 @@ AND total BETWEEN ? AND ?      -- ±$0.50
 |-------|---------------|-----------|
 | Merchant | `SequenceMatcher` ratio ≥ 0.6 | Handles OCR/LLM typos, abbreviations, variant spellings |
 
-Uses `difflib.SequenceMatcher` (stdlib) — no external dependency. Example: `"SHASIHATI S KALE MD"` vs `"SHASHIMATI S KALE MD"` scores 0.92, well above the 0.6 threshold.
+Uses `difflib.SequenceMatcher` (stdlib) — no external dependency.
 
 ### Dedup in the UI
 
 - Runs on **user-edited data** (not raw LLM output) — so corrections are checked
-- Triggers in real-time as user edits fields (Streamlit rerun model)
+- Triggers in real-time as user edits fields (debounced 500ms)
 - Shows side-by-side comparison: new vs existing receipt data + images
 - Duplicate approval requires confirmation via modal dialog
 
@@ -234,7 +251,8 @@ Uses `difflib.SequenceMatcher` (stdlib) — no external dependency. Example: `"S
 
 - **Event-based** (default): Uses `watchdog` library for instant file detection via OS-native events (FSEvents on macOS, inotify on Linux)
 - **Poll fallback**: Set `RECEIPT_WATCHER_MODE=poll` for 30-second interval scanning
-- On startup, scans for files already in the watch folder (catches files dropped while watcher was off)
+- Watches **two folders simultaneously**: `~/Receipts` (drop folder) and `data/incoming/` (UI uploads)
+- On startup, scans for files already in both watch folders (catches files dropped while watcher was off)
 - On success: deletes original from watch folder
 - On error: logs error, leaves file for retry
 
@@ -242,17 +260,73 @@ Uses `difflib.SequenceMatcher` (stdlib) — no external dependency. Example: `"S
 
 | Mode | How to run | When to use |
 |------|-----------|-------------|
-| **Standalone process** | `python -m agents.receipt_analyzer.watcher` | Recommended — runs independently of UI |
+| **Standalone process** | `python -m agents.receipt_analyzer.watcher` | Recommended — runs independently of API |
 | **Console script** | `receipt-watcher` (after `pip install -e .`) | Same as above, convenience alias |
-| **Embedded in Streamlit** | Set `START_WATCHER_IN_UI=true` in `.env` | Only if not running standalone |
-
-**Important:** Run only one watcher at a time. If running standalone, set `START_WATCHER_IN_UI=false` in `.env` to disable the embedded watcher.
 
 ### Supported File Types
 
 `.png`, `.jpg`, `.jpeg`, `.heic`, `.heif`, `.pdf`, `.webp`, `.gif`
 
 Skips hidden files (starting with `.`).
+
+---
+
+## API Layer
+
+### Running
+
+```bash
+# Accessible on local network (e.g., from phone)
+uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+The API serves both the REST endpoints and the static HTML/JS frontend.
+
+### Key Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/receipts/upload` | Queue 1+ files to `data/incoming/` |
+| `GET` | `/api/receipts/staged` | List all staged receipts |
+| `POST` | `/api/receipts/staged/{id}/approve` | Approve + save to DB |
+| `POST` | `/api/receipts/staged/{id}/reject` | Reject + move to rejected/ |
+| `POST` | `/api/receipts/staged/{id}/reanalyze` | Re-run LLM extraction |
+| `GET` | `/api/receipts/image/{source}/{filename}` | Serve receipt image |
+| `GET` | `/api/expenses` | Query approved receipts (filterable) |
+| `GET` | `/api/expenses/summary` | Aggregate stats by category |
+| `DELETE` | `/api/expenses/{id}` | Delete receipt + archived image |
+| `GET` | `/api/categories` | List all known categories |
+
+### Upload Flow
+
+UI uploads do **not** trigger LLM analysis synchronously. Instead:
+1. Files are written to `data/incoming/`
+2. Response returns immediately with `QueueResponse` (count + filenames)
+3. Background watcher picks up files and processes them asynchronously
+4. UI polls `/api/receipts/staged` every 4s to update the pending badge
+
+---
+
+## UI (FastAPI + Vanilla JS)
+
+### Tabs
+
+1. **Upload Receipt** — Multi-file selector; queues files and shows confirmation
+2. **Pending Review (N)** — Lists all staged receipts with count badge, expandable cards
+3. **Expenses** — Filterable table (date range, category, merchant) with View button per row
+4. **Summary** — Aggregate metrics + spending-by-category bar chart
+
+### Review Form Features
+
+- **Editable fields:** Merchant, Address, Date, Category, Payment, Currency, Subtotal, Tax, Tip, Total
+- **Read-only:** Line items table
+- **Action buttons:** Approve & Save, Reject, Re-analyze, Copy JSON
+- **Lazy loading:** Only the first pending receipt form is rendered; others load on expand
+- **Duplicate detection:** Debounced real-time check as user edits fields
+
+### Static Asset Caching
+
+The `app.js` script tag includes a version query string (`?v=N`) to bust browser cache when the JS changes. Bump this when making breaking changes to field names or request formats — especially important for mobile clients which cache aggressively.
 
 ---
 
@@ -277,7 +351,7 @@ CREATE TABLE receipts (
 );
 ```
 
-- **WAL mode** enabled for concurrent read/write (watcher + UI)
+- **WAL mode** enabled for concurrent read/write (watcher + API)
 - Line items stored as JSON string in `items_json` column
 - Dates stored as ISO strings (sort correctly, unambiguous)
 - Displayed in US format (MM/DD/YYYY) in the UI
@@ -288,35 +362,11 @@ CREATE TABLE receipts (
 
 | Folder | Purpose | Files | Lifecycle |
 |--------|---------|-------|-----------|
-| `~/Receipts` | Watch folder (user input) | Receipt images/PDFs | Deleted after successful staging |
-| `data/uploads/` | Direct UI uploads | Receipt images/PDFs | Persists |
+| `~/Receipts` | Watch folder (user drop) | Receipt images/PDFs | Deleted after successful staging |
+| `data/incoming/` | UI upload landing area | Receipt images/PDFs | Deleted after successful staging |
 | `data/staging/` | Pending review | Image + JSON sidecar pairs | Removed on approve/reject |
 | `data/archive/` | Approved receipts | Receipt images | Permanent storage |
 | `data/rejected/` | Rejected receipts | Image + JSON sidecar | For later review |
-
----
-
-## UI (Streamlit)
-
-### Tabs
-
-1. **Upload Receipt** — File uploader + review form for just-uploaded receipt
-2. **Pending Review (N)** — Lists all staged receipts with count badge, Refresh button
-3. **Expenses** — Filterable table (date range, category, merchant) with Search button
-4. **Summary** — Aggregate metrics + spending-by-category bar chart
-
-### Review Form Features
-
-- **Editable fields:** Merchant, Address, Date, Category, Payment, Currency, Subtotal, Tax, Tip, Total
-- **Read-only:** Line items table
-- **Action buttons:** Approve & Save, Reject, Re-analyze, Copy JSON
-- **Re-analyze:** Re-runs LLM extraction on the same image (useful when extraction is wrong)
-- **Copy JSON:** Clipboard copy via base64-encoded JavaScript (no page reload)
-
-### Date Display
-
-- **Storage:** ISO format `YYYY-MM-DD` (unambiguous, sorts correctly)
-- **UI display:** US format `MM/DD/YYYY` via date_input format parameter
 
 ---
 
@@ -341,6 +391,7 @@ LANGSMITH_PROJECT=personal-agent
 
 # Receipt folders (optional — defaults shown)
 RECEIPT_WATCH_FOLDER=~/Receipts
+RECEIPT_INCOMING_FOLDER=./data/incoming
 RECEIPT_STAGING_FOLDER=./data/staging
 RECEIPT_ARCHIVE_FOLDER=./data/archive
 RECEIPT_REJECTED_FOLDER=./data/rejected
@@ -348,8 +399,6 @@ RECEIPT_WATCH_INTERVAL_SECONDS=30
 ```
 
 **Important:** `load_dotenv()` must run before any LangChain imports for LangSmith tracing to work.
-
-**Important:** Settings uses `"extra": "ignore"` so LangSmith env vars (not in the Settings model) don't cause validation errors.
 
 ---
 
@@ -372,22 +421,20 @@ llm = get_llm(temperature=0.5)          # Pass kwargs to underlying model
 
 ```bash
 # Setup
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync
 
 # Configure
 cp .env.example .env
 # Edit .env with your API keys
 
-# Run
-streamlit run ui/app.py
+# Terminal 1: Start the watcher
+uv run python -m agents.receipt_analyzer.watcher
+
+# Terminal 2: Start the API + UI
+uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-The app will:
-1. Initialize the SQLite database
-2. Start the background watcher thread
-3. Open the web UI at `http://localhost:8501`
+Open `http://localhost:8000` in a browser. Accessible from other devices on the same network via `http://<your-ip>:8000`.
 
 ---
 
@@ -402,8 +449,9 @@ The app will:
 | Fuzzy dedup (not exact match) | Handles LLM extraction variance across runs |
 | ISO dates in storage, US dates in UI | Unambiguous sorting + user-friendly display |
 | `load_dotenv()` before LangChain imports | Required for LangSmith env var detection |
-| Streamlit for UI (for now) | Quick to build; may switch to NiceGUI or FastAPI+HTMX later |
-| Linear pipeline (not ReAct) | Sufficient for current use case; ReAct planned when tools are added |
+| Upload queues to `data/incoming/` (not processed inline) | Decouples UI from LLM latency; watcher handles all sources uniformly |
+| Vanilla JS frontend (no framework) | No build step, easy to iterate, full control |
+| `?v=N` cache buster on `app.js` | Mobile browsers cache JS aggressively; bump N when field names change |
 
 ---
 
@@ -411,66 +459,33 @@ The app will:
 
 | # | Item | Status | Priority |
 |---|------|--------|----------|
-| 1 | Improved Duplicate Detection | Done (fuzzy merchant matching via SequenceMatcher) | High |
-| 2 | UI Framework Migration | Pending | Medium |
-| 3 | ReAct Agent Pattern with DeepAgents | Pending | Medium |
-| 4 | Standalone Watcher as System Service | Partial (standalone done, service pending) | Low |
-| 5 | Audit & Recovery Utility | Pending | Low |
-| 6 | Multi-Row Delete in Expenses | Pending | Low |
+| 1 | Improved Duplicate Detection | Done | High |
+| 2 | UI Framework Migration (Streamlit → FastAPI + vanilla JS) | Done | Medium |
+| 3 | Multi-file Upload + Landing Area | Done | Medium |
+| 4 | E2E Evals Framework | Pending (plan in `docs/evals-plan.md`) | High |
+| 5 | ReAct Agent Pattern with DeepAgents | Pending | Medium |
+| 6 | Standalone Watcher as System Service (launchd) | Pending | Low |
+| 7 | Audit & Recovery Utility | Pending | Low |
+| 8 | Multi-Row Delete in Expenses | Pending | Low |
 
-### 1. Improved Duplicate Detection — DONE
+### 4. E2E Evals Framework
 
-**Implemented:** Two-phase fuzzy matching — SQL narrows by date ±1 day and total ±$0.50, then Python `difflib.SequenceMatcher` compares merchant names with 0.6 similarity threshold. Handles OCR/LLM typos, abbreviations, and variant spellings.
+See `docs/evals-plan.md` for the full plan. Four tiers: unit, integration, e2e (FastAPI TestClient), and live (real LLM + LLM-as-judge). Not yet implemented.
 
-**Remaining sub-item:** Also check staged receipts (not just the DB). Currently, if two copies of the same receipt are staged but neither is approved, no duplicate warning is shown.
-
-### 2. UI Framework Migration
-
-**Current state:** Streamlit. Quick to build and iterate, but has inherent limitations:
-- Full page rerun on every interaction (no partial updates)
-- Tab state not preserved reliably across reruns
-- No true modal/popup without rerun
-- Background updates (e.g., watcher results) require manual refresh
-
-**Candidates for migration:**
-- **NiceGUI** — Python-native, event-driven, real-time updates via WebSocket, similar simplicity to Streamlit
-- **FastAPI + HTMX** — Lightweight, server-rendered, partial page updates without full reloads
-- **FastAPI + React/Next.js** — Full SPA, most flexible but highest complexity
-
-**Migration impact:** The agent/storage layer has zero UI dependencies. Migration means rewriting `ui/app.py` only. All business logic (`agent.py`, `staging.py`, `storage.py`, `graph.py`) is portable as-is.
-
-### 3. ReAct Agent Pattern with DeepAgents
+### 5. ReAct Agent Pattern with DeepAgents
 
 **Current state:** Linear 4-node LangGraph pipeline (detect → extract → validate → stage). Sufficient for the current single-task workflow.
 
-**When to evolve:** When the receipt agent needs to make decisions or use external tools:
-- Merchant lookup API (enrich merchant data, normalize names)
-- Currency conversion API (for international receipts)
-- Category classification using purchase history
-- Multi-receipt batch processing with decision logic
+**When to evolve:** When the receipt agent needs tools — merchant lookup, currency conversion, category classification using history, etc.
 
-**Approach:** Refactor to a ReAct (Reason + Act) pattern using DeepAgents (already installed). The agent would reason about each receipt, decide which tools to invoke, and iterate until satisfied with the extraction quality. The linear pipeline nodes become tools the ReAct agent can call.
+### 6. Standalone Watcher as System Service
 
-### 4. Standalone Watcher as System Service
+**Future:** Package as a `launchd` plist (macOS) or `systemd` unit file (Linux) for always-on background processing without a terminal window.
 
-**Current state:** Watcher runs as a standalone process (`python -m agents.receipt_analyzer.watcher`) or as a background thread inside Streamlit. User must manually start it.
+### 7. Audit & Recovery Utility
 
-**Future:** Package as a system service for always-on monitoring:
-- **macOS:** `launchd` plist (auto-start on login)
-- **Linux:** `systemd` unit file (auto-start on boot)
-- **Docker:** Dedicated watcher container alongside the UI container
+CLI utility to detect and fix inconsistencies: orphaned sidecars, DB records pointing to missing images, images in wrong folders after partial approval failures.
 
-### 5. Audit & Recovery Utility
+### 8. Multi-Row Delete in Expenses
 
-**Need:** When the approval flow partially fails (e.g., DB saved but image move fails), data can become inconsistent — image in wrong folder, DB path mismatch, orphaned sidecars.
-
-**Approach:** A CLI utility that scans for inconsistencies and fixes them:
-- Image in staging but receipt in DB → move image to archive, fix DB path
-- Orphaned sidecar JSON with no image → clean up or flag for re-upload
-- DB record pointing to non-existent image → scan all folders to locate it
-
-### 6. Multi-Row Delete in Expenses
-
-**Current state:** Single receipt delete via the detail popup (click row → view detail → delete).
-
-**Future:** Allow selecting multiple rows in the Expenses table and deleting them in bulk. Useful for cleaning up test data or removing a batch of incorrectly processed receipts. Requires Streamlit's `selection_mode="multi-row"` and a bulk delete confirmation dialog.
+Currently single receipt delete via the detail modal. Bulk select + delete for cleaning up test data or batch errors.

@@ -4,6 +4,7 @@ const API = '/api';
 // ── State ──
 let currentStagingId = null;  // Upload tab's active staging ID
 let categoryChart = null;     // Chart.js instance
+let pendingRefreshTimer = null; // Auto-refresh timer for pending tab
 
 // ── Initialization ──
 document.addEventListener('DOMContentLoaded', init);
@@ -48,62 +49,70 @@ function setupUpload() {
     const analyzeBtn = document.getElementById('analyze-btn');
 
     fileInput.addEventListener('change', () => {
-        analyzeBtn.disabled = !fileInput.files.length;
+        const count = fileInput.files.length;
+        analyzeBtn.disabled = count === 0;
+        analyzeBtn.textContent = count > 1 ? `Upload ${count} Receipts` : 'Upload Receipt(s)';
     });
 
     analyzeBtn.addEventListener('click', async () => {
-        if (!fileInput.files.length) return;
-        await analyzeReceipt(fileInput.files[0]);
+        const files = Array.from(fileInput.files);  // snapshot before any async work
+        if (!files.length) return;
+        await queueReceipts(files);
     });
 }
 
-async function analyzeReceipt(file) {
+async function queueReceipts(files) {
     const formData = new FormData();
-    formData.append('file', file);
-    showSpinner();
+    Array.from(files).forEach(file => formData.append('files', file));
+    const statusDiv = document.getElementById('upload-status');
+    analyzeBtn_disable(true);
     try {
         const result = await api('/receipts/upload', { method: 'POST', body: formData });
-        if (result.error) {
-            showAlert('upload-review', result.error, 'error');
-            return;
+        const lines = [`<strong>${result.queued}</strong> receipt(s) queued for processing.`];
+        if (result.filenames.length) {
+            lines.push(`Files: ${result.filenames.map(f => escapeHtml(f)).join(', ')}`);
         }
-        currentStagingId = result.staging_id;
-
-        // Show size info
-        const sizeInfo = document.getElementById('upload-size-info');
-        if (result.original_size_bytes) {
-            const origMB = (result.original_size_bytes / 1_000_000).toFixed(1);
-            const sentMB = (result.sent_size_bytes / 1_000_000).toFixed(1);
-            sizeInfo.textContent = result.original_size_bytes !== result.sent_size_bytes
-                ? `Original: ${origMB} MB → Sent: ${sentMB} MB`
-                : `Size: ${origMB} MB (no resize needed)`;
-            sizeInfo.classList.remove('hidden');
+        if (result.errors.length) {
+            lines.push(`<span style="color:#c62828">Errors: ${result.errors.map(e => escapeHtml(e)).join('; ')}</span>`);
         }
+        lines.push('Switch to <strong>Pending Review</strong> to see them once processed.');
+        statusDiv.innerHTML = `<div class="alert alert-success">${lines.join('<br>')}</div>`;
+        document.getElementById('file-input').value = '';
+        analyzeBtn_disable(false);
+        document.getElementById('analyze-btn').textContent = 'Upload Receipt(s)';
+        document.getElementById('analyze-btn').disabled = true;
 
-        await showUploadReview();
+        // Start auto-refreshing pending count while watcher processes
+        startPendingAutoRefresh();
         await refreshPendingCount();
     } catch (e) {
-        showAlert('upload-review', e.message, 'error');
-    } finally {
-        hideSpinner();
+        statusDiv.innerHTML = `<div class="alert alert-error">${escapeHtml(e.message)}</div>`;
+        analyzeBtn_disable(false);
     }
 }
 
-async function showUploadReview() {
-    const staged = await api(`/receipts/staged/${currentStagingId}`);
-    const container = document.getElementById('upload-review');
-    container.innerHTML = '';
-    const infoDiv = document.createElement('div');
-    infoDiv.className = 'alert alert-info';
-    infoDiv.textContent = 'Review the extracted data below. Edit if needed, then approve or reject.';
-    container.appendChild(infoDiv);
-    await renderReviewForm(staged, container, 'upload');
+function analyzeBtn_disable(disabled) {
+    document.getElementById('analyze-btn').disabled = disabled;
+}
+
+function startPendingAutoRefresh() {
+    if (pendingRefreshTimer) return; // already running
+    pendingRefreshTimer = setInterval(async () => {
+        await refreshPendingCount();
+    }, 4000);
+    // Stop after 3 minutes (watcher should have processed by then)
+    setTimeout(() => stopPendingAutoRefresh(), 180_000);
+}
+
+function stopPendingAutoRefresh() {
+    if (pendingRefreshTimer) {
+        clearInterval(pendingRefreshTimer);
+        pendingRefreshTimer = null;
+    }
 }
 
 function clearUploadState() {
     currentStagingId = null;
-    document.getElementById('upload-review').innerHTML = '';
-    document.getElementById('upload-size-info').classList.add('hidden');
     document.getElementById('file-input').value = '';
     document.getElementById('analyze-btn').disabled = true;
 }
@@ -342,12 +351,7 @@ async function handleReanalyze(stagingId, prefix) {
             showToast(result.error, 'error');
             return;
         }
-        if (prefix === 'upload') {
-            currentStagingId = result.staging_id;
-            await showUploadReview();
-        } else {
-            await loadPending();
-        }
+        await loadPending();
         showToast('Re-analysis complete');
     } catch (e) {
         showToast(e.message, 'error');

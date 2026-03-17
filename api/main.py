@@ -5,10 +5,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+logger = logging.getLogger(__name__)
 
 from api import mgr
 from api.routers import expenses, receipts
@@ -29,6 +34,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    logger.error(
+        "Validation error %s %s | content-type: %s | content-length: %s | %s",
+        request.method, request.url.path,
+        request.headers.get("content-type", "-"),
+        request.headers.get("content-length", "-"),
+        exc.errors(),
+    )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
 
 app.include_router(receipts.router, prefix="/api")
 app.include_router(expenses.router, prefix="/api")

@@ -9,6 +9,7 @@ from api.image import path_to_image_url
 from api.models import (
     AnalyzeResponse,
     DuplicateCheckResponse,
+    QueueResponse,
     ReceiptEditData,
     ReceiptResponse,
     StagedReceiptResponse,
@@ -16,8 +17,6 @@ from api.models import (
 from shared.config.settings import settings
 
 router = APIRouter(tags=["receipts"])
-
-UPLOAD_DIR = Path("./data/uploads")
 
 
 # ── Image serving ──
@@ -75,30 +74,33 @@ def _cache_headers() -> dict:
     return {"Cache-Control": "public, max-age=86400"}
 
 
-# ── Upload & analyze ──
+# ── Upload (queue to incoming folder) ──
 
 
-@router.post("/receipts/upload", response_model=AnalyzeResponse)
-def upload_and_analyze(file: UploadFile = File(...)):
-    """Upload a receipt file and run LLM extraction. Blocking (runs in threadpool)."""
+@router.post("/receipts/upload", response_model=QueueResponse)
+async def upload_receipts(files: list[UploadFile] = File(...)):
+    """Queue one or more receipt files for background processing by the watcher."""
     allowed = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".pdf"}
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in allowed:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
+    incoming_dir = settings.receipt_incoming_folder
+    incoming_dir.mkdir(parents=True, exist_ok=True)
 
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    save_path = UPLOAD_DIR / file.filename
-    save_path.write_bytes(file.file.read())
+    queued, filenames, errors = 0, [], []
 
-    result = mgr.analyze(str(save_path))
+    for file in files:
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in allowed:
+            errors.append(f"{file.filename}: unsupported file type")
+            continue
+        dest = incoming_dir / file.filename
+        # Avoid collisions: append suffix if file already exists
+        if dest.exists():
+            stem = dest.stem
+            dest = incoming_dir / f"{stem}_{queued}{suffix}"
+        dest.write_bytes(await file.read())
+        filenames.append(dest.name)
+        queued += 1
 
-    if result.get("error"):
-        return AnalyzeResponse(error=result["error"])
-    return AnalyzeResponse(
-        staging_id=result.get("staging_id"),
-        original_size_bytes=result.get("original_size_bytes", 0),
-        sent_size_bytes=result.get("sent_size_bytes", 0),
-    )
+    return QueueResponse(queued=queued, filenames=filenames, errors=errors)
 
 
 # ── Staging CRUD ──

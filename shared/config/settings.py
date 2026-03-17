@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     # Receipt folders
     receipt_watch_folder: Path = Path("~/Receipts")
+    receipt_incoming_folder: Path = Path("./data/incoming")  # UI uploads land here
     receipt_staging_folder: Path = Path("./data/staging")
     receipt_archive_folder: Path = Path("./data/archive")
     receipt_rejected_folder: Path = Path("./data/rejected")
