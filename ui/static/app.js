@@ -5,6 +5,7 @@ const API = '/api';
 let currentStagingId = null;  // Upload tab's active staging ID
 let categoryChart = null;     // Chart.js instance
 let pendingRefreshTimer = null; // Auto-refresh timer for pending tab
+let lastKnownPendingCount = -1; // Tracks count to avoid unnecessary list re-renders
 
 // ── Initialization ──
 document.addEventListener('DOMContentLoaded', init);
@@ -98,7 +99,15 @@ function analyzeBtn_disable(disabled) {
 function startPendingAutoRefresh() {
     if (pendingRefreshTimer) return; // already running
     pendingRefreshTimer = setInterval(async () => {
-        await refreshPendingCount();
+        const count = await refreshPendingCount();
+        // Only reload the list if count changed (new item arrived from watcher)
+        // — avoids resetting expand/collapse state on every tick
+        if (count !== lastKnownPendingCount) {
+            lastKnownPendingCount = count;
+            if (document.getElementById('tab-pending').classList.contains('active')) {
+                await loadPending();
+            }
+        }
     }, 4000);
     // Stop after 3 minutes (watcher should have processed by then)
     setTimeout(() => stopPendingAutoRefresh(), 180_000);
@@ -476,8 +485,10 @@ async function refreshPendingCount() {
         } else {
             badge.classList.add('hidden');
         }
+        return count;
     } catch (e) {
         // Silently ignore
+        return lastKnownPendingCount; // return last known so no spurious reload
     }
 }
 
