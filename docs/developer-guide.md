@@ -303,7 +303,22 @@ UI uploads do **not** trigger LLM analysis synchronously. Instead:
 1. Files are written to `data/incoming/`
 2. Response returns immediately with `QueueResponse` (count + filenames)
 3. Background watcher picks up files and processes them asynchronously
-4. UI polls `/api/receipts/staged` every 4s to update the pending badge
+4. UI starts a 3-minute polling window (every 4s) to detect when staged items appear
+
+### Pending Review Polling
+
+Polling is triggered **only by a UI upload** — not by files dropped into `~/Receipts`.
+
+| Aspect | Behavior |
+|--------|----------|
+| Trigger | `queueReceipts()` call (Upload button) |
+| Interval | Every 4 seconds |
+| Duration | 3 minutes, then stops automatically |
+| Badge update | Every tick |
+| List redraw | Only when staged count changes — avoids resetting expand/collapse state |
+| Next upload | Restarts the 3-minute window |
+
+For receipts dropped into `~/Receipts` directly, the UI does **not** auto-update. Use the **Refresh** button on the Pending Review tab, or switch away and back to the tab.
 
 ---
 
