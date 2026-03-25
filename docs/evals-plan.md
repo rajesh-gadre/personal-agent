@@ -38,10 +38,10 @@ evals/
         test_manager.py              # ReceiptManager facade
     e2e/
         __init__.py
-        test_api_upload.py           # FastAPI TestClient: upload -> staged -> approve -> query
+        test_api_upload.py           # FastAPI TestClient: upload (single + multi) -> QueueResponse -> watcher -> staged -> approve -> query
         test_api_expenses.py         # Query, summary, delete endpoints
         test_api_staging.py          # List/get/update/reject staged receipts
-        test_watcher_e2e.py          # Drop file in watch folder -> verify staged
+        test_watcher_e2e.py          # Drop file in ~/Receipts and data/incoming/ -> verify staged
     live/
         __init__.py
         conftest.py                  # Skip if no API key; load real images
@@ -65,6 +65,7 @@ def isolated_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "receipt_archive_folder", tmp_path / "archive")
     monkeypatch.setattr(settings, "receipt_rejected_folder", tmp_path / "rejected")
     monkeypatch.setattr(settings, "receipt_watch_folder", tmp_path / "watch")
+    monkeypatch.setattr(settings, "receipt_incoming_folder", tmp_path / "incoming")
     # Create dirs + init DB tables
     ...
     yield
@@ -246,8 +247,9 @@ dev = [
 - `test_manager.py` — ReceiptManager methods
 
 ### Step 4: E2E / API evals
-- `test_api_upload.py`, `test_api_staging.py`, `test_api_expenses.py`
-- `test_watcher_e2e.py`
+- `test_api_upload.py` — single file upload, multi-file upload, unsupported type; verify `QueueResponse` fields; verify files land in `incoming/`; simulate watcher picking up → staged
+- `test_api_staging.py`, `test_api_expenses.py`
+- `test_watcher_e2e.py` — drop file in `incoming/` (UI path) and `watch/` (~/Receipts path) → both verify staged
 
 ### Step 5: Judge + Live evals
 - `judges/extraction_judge.py` — judge class with `evaluate()` and `evaluate_with_image()`
