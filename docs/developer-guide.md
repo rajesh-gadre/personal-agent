@@ -470,6 +470,68 @@ Open `http://localhost:8000` in a browser. Accessible from other devices on the 
 
 ---
 
+## Evals Framework
+
+Tests live in `evals/` and are split into four tiers. Run them with `uv run pytest`.
+
+```
+evals/
+├── conftest.py          # Shared fixtures: DB isolation, mock LLM, synthetic images
+├── fixtures/
+│   └── receipt_data.py  # Pre-built ExtractionResult objects for every receipt variant
+├── unit/                # Pure logic, no I/O mocks needed
+├── integration/         # Full pipeline wiring, only LLM mocked
+├── e2e/                 # FastAPI TestClient, LLM mocked
+└── live/                # Real LLM + LLM-as-judge (skipped in CI)
+```
+
+### Test Isolation
+
+Every test gets a **fresh temp SQLite DB and temp folders** via an `autouse` fixture that monkeypatches all path settings on the `settings` singleton. No test touches production data.
+
+### Unit Tests (`@pytest.mark.unit`)
+
+**Goal:** Verify individual functions behave correctly in isolation — schema validation, file type detection, DB CRUD, staging file ops, duplicate matching. Fast, no external dependencies.
+
+**What they mock:** Nothing. Unit tests cover pure logic or code that only touches the local filesystem and SQLite. No LLM, no network.
+
+**Examples:**
+- `test_schemas.py` — Pydantic validates a `LineItem` with negative total (trade-in credit)
+- `test_duplicate_check.py` — fuzzy matcher finds "Whole Foods Market" ↔ "Whole Foods" as duplicate; rejects "Target" ↔ "Whole Foods"
+- `test_storage.py` — `save_receipt()` → `get_receipt_by_id()` round-trip preserves all fields
+
+### Integration Tests (`@pytest.mark.integration`)
+
+**Goal:** Verify that all components wire together correctly — LangGraph routing, staging workflow, ReceiptManager facade. Uses a real DB and real filesystem; only the LLM is mocked.
+
+**What they mock:** Only `agents.receipt_analyzer.graph.get_llm`. Everything else is real: SQLite writes, file copies/moves, image reading, LangGraph conditional routing.
+
+**`MockLLMController`** lets each test preset sequential responses for the two-call pipeline. Call 1 (extraction) gets `responses[0]`; call 2 (validation) gets `responses[1]`. For invalid receipts the controller verifies only 1 call was made.
+
+**Examples:**
+- `test_pipeline_mock.py` — valid receipt triggers 2 LLM calls; invalid receipt triggers 1 (validation node skipped); `GROCERY_BAD_MATH` extraction followed by `GROCERY_CORRECTED` validation → staged total is the corrected value
+- `test_staging_workflow.py` — `analyze()` → `approve_staged()` → `get_receipt_by_id()` returns correct merchant/total; image physically moves to `archive/`
+- `test_manager.py` — `update_staged()` edits persist into the DB record after `approve()`
+
+### E2E Tests (`@pytest.mark.e2e`) — Pending
+
+FastAPI `TestClient` + mocked LLM. Tests the HTTP layer end-to-end: upload → staged → approve → query → delete.
+
+### Live Tests (`@pytest.mark.live`) — Pending
+
+Real LLM calls on real receipt images. An LLM-as-judge (`evals/judges/extraction_judge.py`) evaluates extraction quality automatically. Skipped in CI; requires `ANTHROPIC_API_KEY`.
+
+### Running
+
+```bash
+uv run pytest             # unit + integration + e2e (default; skips live)
+uv run pytest -m unit
+uv run pytest -m integration
+uv run pytest -m live --timeout=120   # manual only
+```
+
+---
+
 ## Future Improvements
 
 | # | Item | Status | Priority |
@@ -477,7 +539,7 @@ Open `http://localhost:8000` in a browser. Accessible from other devices on the 
 | 1 | Improved Duplicate Detection | Done | High |
 | 2 | UI Framework Migration (Streamlit → FastAPI + vanilla JS) | Done | Medium |
 | 3 | Multi-file Upload + Landing Area | Done | Medium |
-| 4 | E2E Evals Framework | Pending (plan in `docs/evals-plan.md`) | High |
+| 4 | E2E Evals Framework | In progress (unit + integration done) | High |
 | 5 | ReAct Agent Pattern with DeepAgents | Pending | Medium |
 | 6 | Standalone Watcher as System Service (launchd) | Pending | Low |
 | 7 | Audit & Recovery Utility | Pending | Low |
@@ -485,7 +547,7 @@ Open `http://localhost:8000` in a browser. Accessible from other devices on the 
 
 ### 4. E2E Evals Framework
 
-See `docs/evals-plan.md` for the full plan. Four tiers: unit, integration, e2e (FastAPI TestClient), and live (real LLM + LLM-as-judge). Not yet implemented.
+See `docs/evals-plan.md` for the full plan and the **Evals Framework** section above for the current state. Unit and integration tiers are complete. E2E (FastAPI TestClient) and live (real LLM + judge) tiers are pending.
 
 ### 5. ReAct Agent Pattern with DeepAgents
 
