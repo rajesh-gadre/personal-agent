@@ -7,3 +7,6 @@ dist/
 .venv/
 .ruff_cache/
 .DS_Store
+.coverage
+evals/fixtures/live_receipts/*
+!evals/fixtures/live_receipts/.gitkeep

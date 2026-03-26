@@ -8,10 +8,10 @@ Analyze the provided image/document and extract the following:
 - merchant_address: Full address if visible
 - date: The transaction date. Read the EXACT date as printed on the receipt — transcribe the year LITERALLY as shown. For 2-digit years, treat as 20xx (e.g. "25" means 2025, "21" means 2021). Do NOT adjust or guess the year. Output in YYYY-MM-DD format.
 - items: List of ALL line items, each with description, quantity, unit_price, total. Include discounts, credits, and trade-ins as items with negative values.
-- subtotal: Pre-tax subtotal
+- subtotal: Pre-tax subtotal (negative for return/refund receipts)
 - tax: Tax amount
 - tip: Tip amount if applicable
-- total: Final total
+- total: Final total. For return or refund receipts the total may be negative — extract the sign exactly as printed on the receipt.
 - payment_method: e.g. "Visa ending 1234", "Cash", "Apple Pay"
 - category: Use one of these existing categories if appropriate: {categories}. If none fit well (avoid defaulting to "other" when a more specific category exists), suggest a new descriptive category (lowercase, single word or hyphenated, e.g. "pet-care", "education", "insurance").
 - currency: 3-letter currency code (default USD)
